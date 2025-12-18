@@ -37,6 +37,7 @@ class OCSnapshot {
         Map? selectedSnapshot;
         Map? userSnapshot;
 
+        // Time to determine the snapshot to use
         opencoreHash ??= "";
 
         if (opencoreVersion != null && !opencoreVersion.latest) {
@@ -107,6 +108,7 @@ class OCSnapshot {
             exit(1);
         }
 
+        // Time to do ACPI blah
         Map snapshotAcpiAdd = selectedSnapshot["acpi_add"] ?? {};
         Map snapshotKextsAdd = selectedSnapshot["kext_add"] ?? {};
         Map snapshotToolsAdd = selectedSnapshot["tool_add"] ?? {};
@@ -177,6 +179,7 @@ class OCSnapshot {
         data["ACPI"]["Add"] = newAcpiAdd;
         onLog?.call("Finished ACPI snapshot: ${["acpiEnabled=${acpiEnabled.length}", "acpiDuplicates=${acpiDuplicates.length}", "acpiDuplicatesDisabled=${acpiDuplicatesDisabled.length}"].join(", ")}");
 
+        // Time to do kexts stuff (this is nightmare fuel)
         if (data["Kexts"] is! Map) data["Kexts"] = {"Add": []};
         if (data["Kexts"]["Add"] is! List) data["Kexts"]["Add"] = [];
 
@@ -410,6 +413,152 @@ class OCSnapshot {
         }
 
         data["Kernel"]["Add"] = orderedKexts;
+        // Wow that took a while
+
+        // Time to do tools stuff
+        if (data["Misc"] is! Map) data["Misc"] = {"Tools": []};
+        if (data["Misc"]["Tools"] is! List) data["Misc"]["Tools"] = [];
+
+        List<Map> toolsList = [];
+
+        for (var tool in files.tools) {
+            if (!pathIsValid(tool)) continue;
+            if (!tool.endsWith(".efi")) continue;
+
+            Map<String, dynamic> entry = {
+                "Name": p.basename(tool),
+                "Path": tool,
+                "Comment": p.basename(tool),
+                "Enabled": true,
+            };
+
+            for (var e in snapshotToolsAdd.entries) {
+                if (e.key == "Flavour" && tool.toLowerCase().endsWith("shell.efi")) {
+                    entry[e.key] == "OpenShell:UEFIShell:Shell";
+                } else {
+                    entry[e.key] == snapshotToolsAdd[e.key];
+                }
+            }
+
+            toolsList.add(entry);
+        }
+
+        List tools = clean ? [] : data["Misc"]["Tools"];
+        tools.sort((a, b) => (a["Path"] as String? ?? "").compareTo((b["Path"] as String? ?? "").toLowerCase()));
+
+        for (var tool in tools) {
+            if (tools.whereType<Map>().map((x) => (x["Path"]?.toString() ?? "").toLowerCase()).contains((tool["Path"]?.toString() ?? "").toLowerCase())) continue;
+            tools.add(tool);
+        }
+
+        List<Map> newTools = [];
+
+        for (var tool in tools.whereType<Map>()) {
+            if (!toolsList.whereType<Map>().map((x) => (x["Path"]?.toString() ?? "").toLowerCase()).contains((tool["Path"]?.toString() ?? "").toLowerCase())) continue; // Not there
+            newTools.add(tool);
+            longPaths.addAll(checkPathLength(tool, "Tools\\"));
+        }
+
+        List<String> toolsEnabled = [];
+        List<String> toolsDuplicates = [];
+        List<Map> toolsDuplicatesDisabled = [];
+
+        for (var tool in newTools) {
+            if (tool["Enabled"] == true) {
+                if (toolsEnabled.contains(tool["Path"] ?? "")) {
+                    var newTool = {};
+                    for (var k in tool.keys) newTool[k] = tool[k];
+                    newTool["Enabled"] = false;
+                    toolsDuplicatesDisabled.add(newTool);
+
+                    if (!toolsDuplicates.contains(tool["Path"] ?? "")) {
+                        toolsDuplicates.add(tool["Path"] ?? "");
+                    }
+                } else {
+                    toolsEnabled.add(tool["Path"] ?? "");
+                    toolsDuplicatesDisabled.add(tool);
+                }
+            }
+        }
+
+        if (toolsDuplicates.isNotEmpty) {
+            onLog?.call("Duplicate tools have been disabled: ${toolsDuplicates.join(", ")}");
+            newTools = toolsDuplicatesDisabled;
+        }
+
+        data["Misc"]["Tools"] = newTools;
+
+        // Almost done! Now just the drivers, this won't be bad, right?
+        if (data["UEFI"] is! Map) data["UEFI"] = {"Drivers": []};
+        if (data["UEFI"]["Drivers"] is! List) data["UEFI"]["Drivers"] = [];
+
+        List driversList = [];
+
+        for (var driver in files.drivers) {
+            if (!pathIsValid(driver)) continue;
+            if (!driver.endsWith(".efi")) continue;
+
+            if (snapshotDriversAdd.isEmpty) {
+                driversList.add(driver);
+            } else {
+                var entry = {
+                    "Enabled": true,
+                    "Path": driver,
+                };
+
+                for (var x in snapshotDriversAdd.entries) {
+                    entry[x.key] = x.key.toLowerCase() == "Comment" ? p.basename(driver) : snapshotDriversAdd[x.key];
+                    driversList.add(entry);
+                }
+            }
+        }
+
+        List drivers = clean ? [] : data["UEFI"]["Drivers"];
+        drivers.sort((a, b) => (a["Path"] as String? ?? "").compareTo((b["Path"] as String? ?? "").toLowerCase()));
+
+        for (var driver in driversList) {
+            if (snapshotDriversAdd.isEmpty) {
+                if (driver is! String || drivers.whereType<String>().map((x) => x.toLowerCase()).contains(driver.toLowerCase())) continue;
+            } else {
+                if (drivers.whereType<Map>().map((x) => (x["Path"]?.toString() ?? "").toLowerCase()).contains((driver["Path"]?.toString() ?? "").toLowerCase())) continue;
+            }
+
+            drivers.add(driver);
+        }
+
+        List newDrivers = [];
+
+        for (var driver in drivers) {
+            if (snapshotDriversAdd.isEmpty) {
+                if (driver is! String || !driversList.whereType<String>().map((x) => x.toLowerCase()).contains(driver.toLowerCase())) continue;
+            } else {
+                if (driver is! Map) continue;
+                if (!driversList.map((x) => x["Path"]?.toString().toLowerCase() ?? "").contains(driver["Path"]?.toString().toLowerCase())) continue;
+            }
+
+            newDrivers.add(driver);
+            longPaths.addAll(checkPathLength(driver, "\\Drivers"));
+        }
+
+        List driversEnabled = [];
+        List driversDuplicates = [];
+        List<Map<dynamic, dynamic>> driversDuplicatesDisabled = [];
+
+        for (var d in newDrivers) {
+            if (d is Map) {
+                if (d["Enabled"] == true) {
+                    if (driversEnabled.contains(d["Path"] ?? "")) {
+                        Map<dynamic, dynamic> newD = {};
+                        for (var k in d.keys) newD[k] = d[k];
+                        newD["Enabled"] = false;
+                        if (!driversDuplicates.contains(d["Path"] ?? "")) driversDuplicatesDisabled.add(newD);
+                    } else {
+                        driversEnabled.add(d["Path"] ?? "");
+                        driversDuplicatesDisabled.add(d);
+                    }
+                }
+            }
+        }
 
         onLog?.call("All done! Finished OC ${clean ? "clean snapshot" : "snapshot"}.");
         return data;
@@ -487,7 +636,7 @@ class OCSnapshot {
 
     /// So we're not counting one of macOS's auto-generated files.
     static bool pathIsValid(String path) {
-        return !path.split(".").contains("__MACOSX");
+        return !path.startsWith(".") && !path.split(".").contains("__MACOSX");
     }
 
     static String pathToRelative(Directory root, String path) {
