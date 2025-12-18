@@ -11,6 +11,7 @@ const bool allowOverwriteOriginal = false;
 
 void main(List<String> arguments) async {
   ArgParser parser = ArgParser()
+    ..addFlag("help", abbr: "h", help: "Show this help message.", negatable: false)
     ..addOption("in", help: "The path to your config.plist.", mandatory: false)
     ..addOption("out", help: "The path to where you want to write the results. This defaults to your in path.")
     ..addOption("oc", help: "The path to your OC folder in your EFI.", mandatory: true)
@@ -27,6 +28,11 @@ void main(List<String> arguments) async {
   } catch (e) {
     print("$e\n\nUsage:\n${parser.usage}");
     exit(1);
+  }
+
+  if (args["help"]) {
+    print("Usage:\n${parser.usage}");
+    exit(0);
   }
 
   try {
