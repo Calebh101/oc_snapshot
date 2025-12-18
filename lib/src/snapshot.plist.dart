@@ -3,19 +3,16 @@
 /// All credit here goes to CorpNewt.
 library;
 
-/// An [SnapshotData] object.
-const snapshot = SnapshotData._();
+/// An [Snapshot] object.
+const snapshot = Snapshot._();
 
 /// Made so I can type [snapshot.plist] and feel cool.
 // ignore: camel_case_types
-class SnapshotData {
-  /// OCSnapshot/Scripts/snapshot.plist.
-  static List<Map<String, dynamic>> get getPlist => _plist;
+class Snapshot {
+  /// A JSON dump of OCSnapshot/Scripts/snapshot.plist by CorpNewt.
+  static List<Map<String, dynamic>> get plist => _plist;
 
-  /// OCSnapshot/Scripts/snapshot.plist.
-  List<Map<String, dynamic>> get plist => getPlist;
-
-  const SnapshotData._();
+  const Snapshot._();
 }
 
 const List<Map<String, dynamic>> _plist = [
