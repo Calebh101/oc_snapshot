@@ -75,28 +75,7 @@ void main(List<String> arguments) async {
       print("OpenCore.efi doesn't exist, ignoring.");
     }
 
-    result = OCSnapshot.snapshot(data, files: (acpi: OCSnapshot.listDirectory(acpi), kexts: OCSnapshot.listKexts(kexts), drivers: OCSnapshot.listDirectory(drivers), tools: OCSnapshot.listDirectory(tools)), onLog: print, opencoreVersion: openCoreVersion, opencoreHash: opencore.existsSync() ? await hash(opencore) : null, clean: args["clean"], forceUpdateSchema: args["force-update-schema"], onPrompt: <T>(message, type, details) async {
-      if (type == OCSnapshotPromptType.duplicateKext && T == bool) {
-        stdout.write(message);
-
-        while (true) {
-          final input = stdin.readLineSync();
-          if (input == null) return false as T;
-
-          switch (input.toLowerCase()) {
-            case "y":
-            case "yes": return true as T;
-
-            case "n":
-            case "no": return false as T;
-
-            default: stdout.writeln("Invalid input (y/n)");
-          }
-        }
-      } else {
-        throw UnimplementedError();
-      }
-    });
+    result = OCSnapshot.snapshot(data, files: (acpi: OCSnapshot.listDirectory(acpi), kexts: OCSnapshot.listKexts(kexts), drivers: OCSnapshot.listDirectory(drivers), tools: OCSnapshot.listDirectory(tools)), onLog: print, opencoreVersion: openCoreVersion, opencoreHash: opencore.existsSync() ? await hash(opencore) : null, clean: args["clean"], forceUpdateSchema: args["force-update-schema"]);
 
     print("Returned from snapshotting");
     break;

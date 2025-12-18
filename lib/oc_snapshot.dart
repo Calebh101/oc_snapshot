@@ -4,10 +4,6 @@ import 'package:oc_snapshot/src/snapshot.plist.dart';
 import 'package:path/path.dart' as p;
 import 'package:plist_parser/plist_parser.dart';
 
-enum OCSnapshotPromptType {
-    duplicateKext,
-}
-
 class OCSnapshot {
     /// From OpenCorePkg's OcStorageLib.h.
     static const int safePathLength = 128;
@@ -35,7 +31,6 @@ class OCSnapshot {
         required ({List<String> acpi, List<KextData> kexts, List<String> drivers, List<String> tools}) files,
 
         void Function(String)? onLog,
-        required Future<T> Function<T>(String message, OCSnapshotPromptType type, Map<String, dynamic> details) onPrompt,
     }) {
         Map? latestSnapshot;
         Map? targetSnapshot;
@@ -212,10 +207,11 @@ class OCSnapshot {
                     "CFBundleIdentifier": infoPlist["CFBundleIdentifier"],
                     "OSBundleLibraries": infoPlist["OSBundleLibraries"] ?? [],
                     "cfbi": infoPlist["CFBundleIdentifier"].toLowerCase(),
-                    "osbl": (infoPlist["OSBundleLibraries"] as List? ?? []).whereType<String>().map((x) => x.toLowerCase()).toList(),
+                    "osbl": (infoPlist["OSBundleLibraries"] as Map? ?? {}).keys.whereType<String>().map((x) => x.toLowerCase()).toList(),
                     "ExecutablePath": kext.executablePath,
                 };
             } catch (e) {
+                onLog?.call("Omitting kext ${kext.name} for unknown error: $e");
                 omittedKexts.add(kext.name);
                 continue;
             }
@@ -239,7 +235,7 @@ class OCSnapshot {
             kexts.add(kext);
         }
 
-        List newKexts = [];
+        List<Map> newKexts = [];
 
         for (var kext in kexts) {
             if (kext is! Map || kext["BundlePath"] is! String) continue;
@@ -260,8 +256,196 @@ class OCSnapshot {
             newKexts.add(kext);
         }
 
+        List<(Map kext, List<(Map<dynamic, dynamic>, Map<String, dynamic>)> parents)> unorderedKexts = [];
+
+        for (var kext in newKexts) {
+            Map<String, dynamic>? info;
+            List<(Map<dynamic, dynamic>, Map<String, dynamic>)> parents = [];
+            List<Map<dynamic, dynamic>> children = [];
+
+            for (var x in kextList) {
+                if ((x.$1["BundlePath"] ?? "") == (kext["BundlePath"] ?? "")) {
+                    info = x.$2;
+                    break;
+                }
+            }
+
+            if (info == null) continue;
+
+            for (var z in newKexts) {
+                for (var y in kextList) {
+                    if (z["BundlePath"] == y.$1["BundlePath"]) {
+                        if ((y.$2["osbl"] as List? ?? []).contains(y.$2["cfbi"] ?? "")) {
+                            parents.add((z, y.$2));
+                        }
+                    }
+                }
+            }
+
+            for (var y in kextList.where((y) => y.$2["osbl"].contains(info!["cfbi"]))) {
+                for (var z in newKexts) {
+                    if ((z['BundlePath'] ?? '') == (y.$1['BundlePath'] ?? '')) {
+                        children.add(z);
+                    }
+                }
+            }
+
+            unorderedKexts.add((kext, parents));
+        }
+
+        List<Map<dynamic, dynamic>> orderedKexts = [];
+        List<(Map<dynamic, dynamic>, Map<String, dynamic>)> disabledParents = [];
+        List<Map<dynamic, dynamic>> cyclicKexts = [];
+
+        int loopsWithoutChanges = 0;
+        bool cyclicDependencies = false;
+
+        while (unorderedKexts.isNotEmpty) {
+            var kext = unorderedKexts.removeAt(0);
+
+            if (kext.$2.isNotEmpty) {
+                List<String> enabledParents = kext.$2.where((x) => x.$1["Enabled"] == true && x.$2["cfbi"] is String).map((x) => x.$2["cfbi"]).whereType<String>().toList();
+
+                if (kext.$1["Enabled"] == true) {
+                    for (var p in kext.$2) {
+                        String? cf = p.$2["cfbi"];
+                        if (cf == null) continue;
+                        if (enabledParents.contains(cf)) continue; // We already have an enabled copy
+                        if (disabledParents.any((x) => x.$2["cfbi"] == cf)) continue;
+                        disabledParents.add(p);
+                    }
+                }
+
+                if (!(kext.$2.map((x) => orderedKexts.contains(x.$1))).every((x) => x)) {
+                    loopsWithoutChanges++;
+                    cyclicKexts.add(kext.$1);
+
+                    if (loopsWithoutChanges > unorderedKexts.length) {
+                        cyclicDependencies = true;
+                        break;
+                    }
+
+                    unorderedKexts.add(kext);
+                    continue;
+                }
+            }
+
+            cyclicKexts.clear();
+            loopsWithoutChanges = 0;
+            orderedKexts.add(kext.$1);
+        }
+
+        if (cyclicDependencies) {
+            onLog?.call("Kexts with cyclic dependencies have been omitted: ${cyclicKexts.map((x) => x["BundlePath"] is String ? x["BundlePath"] : "Unknown kext").join(", ")}");
+        }
+
+        var missingKexts = orderedKexts.where((x) => !originalKexts.contains(x));
+        originalKexts.addAll(missingKexts);
+        List<String> rearranged = [];
+
+        while (true) {
+            List<String> check1 = orderedKexts.where((x) => !rearranged.contains(x["BundlePath"])).map((x) => x["BundlePath"]).whereType<String>().toList();
+            List<String> check2 = originalKexts.where((x) => !rearranged.contains(x["BundlePath"])).map((x) => x["BundlePath"]).whereType<String>().toList();
+
+            int? outOfPlace = List.generate(check1.length, (i) => i).cast<int?>().firstWhere(
+                (i) => check1[i!] != check2[i],
+                orElse: () => null,
+            );
+
+            if (outOfPlace == null) break;
+            rearranged.add(check2[outOfPlace]);
+        }
+
+        if (rearranged.isNotEmpty) {
+            onLog?.call("Incorrect kext load order has been corrected: ${rearranged.join(", ")}");
+        }
+
+        if (disabledParents.isNotEmpty) {
+            for (var p in disabledParents) p.$1["Enabled"] = true;
+            onLog?.call("Disabled parent kexts have been enabled: ${disabledParents.map((x) => x.$1["BundlePath"]).join(", ")}");
+        }
+
+        List<(Map<dynamic, dynamic>, Map<String, dynamic>)> enabledKexts = [];
+        List bundlesEnabled = [];
+        List duplicateBundles = [];
+        List duplicatesDisabled = [];
+        Map<String, dynamic>? info;
+
+        for (var kext in orderedKexts) {
+            longPaths.addAll(checkPathLength(kext, "\\Kexts"));
+            var tempKext = {};
+
+            for (var x in kext.entries) tempKext[x.key] = kext[x.key];
+            duplicatesDisabled.add(tempKext);
+            if (tempKext["Enabled"] != true) continue;
+
+            if ((bundlesEnabled + duplicateBundles).contains(tempKext["BundlePath"])) {
+                tempKext["Enabled"] = false;
+                if (!duplicateBundles.contains(tempKext["BundlePath"])) duplicateBundles.add(tempKext["BundlePath"]);
+            } else {
+                info = kextList.cast<(Map<String, dynamic>, Map<String, dynamic>)?>().firstWhere((x) => x!.$1["BundlePath"] == tempKext["BundlePath"], orElse: () => null)?.$2;
+                if (info == null || info["cfbi"] == null) continue;
+
+                (KernelLimitation min, KernelLimitation max) range = getMinMaxFromKext(tempKext, useMatch: snapshotKextsAdd.containsKey("MatchKernel"));
+                var compKexts = enabledKexts.where((x) => x.$1["cfbi"] == info!["cfbi"]);
+
+                for (var compInfo in compKexts) {
+                    var compKext = compInfo.$1;
+                    (KernelLimitation min, KernelLimitation max) compRange = getMinMaxFromKext(compKext, useMatch: snapshotKextsAdd.containsKey("MatchKernel"));
+                    if (range.$1 > compRange.$2 || range.$2 < compRange.$1) continue;
+                    tempKext["Enabled"] = false;
+                    if (!duplicateBundles.contains(tempKext["BundlePath"] ?? "")) duplicateBundles.add(tempKext["BundlePath"] ?? "");
+                    break;
+                }
+            }
+
+            if (tempKext["Enabled"] == true && info != null) {
+                bundlesEnabled.add(kext["BundlePath"] ?? "");
+                enabledKexts.add((tempKext, info));
+            }
+        }
+
+        if (duplicateBundles.isNotEmpty) {
+            onLog?.call("Duplicate CFBundleIdentifiers have been disabled: ${duplicateBundles.join(", ")}");
+        }
+
+        data["Kernel"]["Add"] = orderedKexts;
+
         onLog?.call("All done! Finished OC ${clean ? "clean snapshot" : "snapshot"}.");
         return data;
+    }
+
+    static (KernelLimitation min, KernelLimitation max) getMinMaxFromKext(Map kext, {bool useMatch = false}) {
+        if (useMatch) return getMinMaxFromMatch(kext["MatchKernel"] ?? "");
+        String min = kext["MinKernel"] ?? "0.0.0";
+        String max = kext["MaxKernel"] ?? "99.99.99";
+        if (min.trim().isEmpty) min = "0.0.0";
+        if (max.trim().isEmpty) max = "99.99.99";
+        return (KernelLimitation.from(min), KernelLimitation.from(max));
+    }
+
+    static (KernelLimitation min, KernelLimitation max) getMinMaxFromMatch(String match) {
+        var min = "0.0.0";
+        var max = "99.99.99";
+        if (match == "1") match = "";
+
+        if (match.trim().isNotEmpty) {
+            try {
+                var minList = match.split(".");
+                var maxList = minList.map((x) => x).toList();
+
+                minList.addAll(List.generate(3 - minList.length, (i) => "0"));
+                maxList.addAll(List.generate(3 - minList.length, (i) => "99"));
+
+                minList.map((x) => x.isEmpty ? "0" : x);
+                maxList.map((x) => x.isEmpty ? "99" : x);
+
+                min = minList.join(".");
+                max = maxList.join(".");
+            } catch (_) {}
+        }
+
+        return (KernelLimitation.from(min), KernelLimitation.from(max));
     }
 
     static List<({Object item, String name, List<String> pathsTooLong})> checkPathLength(Object item, String prefix) {
@@ -306,10 +490,13 @@ class OCSnapshot {
         return !path.split(".").contains("__MACOSX");
     }
 
+    static String pathToRelative(Directory root, String path) {
+        return path.startsWith(root.path) ? path.substring(root.path.length + 1) : path;
+    }
+
     static List<String> listDirectory(Directory directory, {void Function(String) onLog = print}) {
         List<String> results = directory.listSync(recursive: true).whereType<File>().map((x) {
-            final path = x.path;
-            return path.startsWith(directory.path) ? path.substring(directory.path.length + 1) : path;
+            return pathToRelative(directory, x.path);
         }).toList();
 
         onLog("Found ${results.length} files for ${p.basename(directory.path)}");
@@ -394,10 +581,35 @@ class KextData {
 
         return KextData(
             name: name,
-            path: directory.path.startsWith(rootKextsDir.path) ? directory.path.replaceFirst(rootKextsDir.path, "") : directory.path,
-            infoPlistPath: bundle.path.startsWith(directory.path) ? bundle.path.replaceFirst(directory.path, "") : bundle.path,
+            path: OCSnapshot.pathToRelative(rootKextsDir, directory.path),
+            infoPlistPath: OCSnapshot.pathToRelative(directory, bundle.path),
             infoPlistData: info,
-            executablePath: (potentialExecutable?.existsSync() ?? false) ? (potentialExecutable!.path.startsWith(directory.path) ? potentialExecutable.path.replaceFirst(directory.path, "") : potentialExecutable.path) : null,
+            executablePath: (potentialExecutable?.existsSync() ?? false)
+                ? OCSnapshot.pathToRelative(directory, potentialExecutable!.path)
+                : null,
         );
     }
+}
+
+class KernelLimitation implements Comparable<KernelLimitation> {
+    final int major;
+    final int minor;
+    final int patch;
+
+    KernelLimitation.from(String? version) : major = int.tryParse(version?.split(".").elementAtOrNull(0) ?? "") ?? 0, minor = int.tryParse(version?.split(".").elementAtOrNull(1) ?? "") ?? 0, patch = int.tryParse(version?.split(".").elementAtOrNull(2) ?? "") ?? 0;
+
+    @override
+    int compareTo(KernelLimitation other) {
+        if (major != other.major) return major.compareTo(other.major);
+        if (minor != other.minor) return minor.compareTo(other.minor);
+        return patch.compareTo(other.patch);
+    }
+
+    bool operator <(KernelLimitation other) => compareTo(other) < 0;
+    bool operator >(KernelLimitation other) => compareTo(other) > 0;
+    bool operator <=(KernelLimitation other) => compareTo(other) <= 0;
+    bool operator >=(KernelLimitation other) => compareTo(other) >= 0;
+
+    @override
+    bool operator ==(Object other) => other is KernelLimitation && compareTo(other) == 0;
 }
