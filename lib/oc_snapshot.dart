@@ -1,9 +1,16 @@
+/// This library contains methods for doing an OC snapshot in Dart, ported from CorpNewt's ProperTree.
+library;
+
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:oc_snapshot/src/snapshot.plist.dart';
 import 'package:path/path.dart' as p;
 import 'package:plist_parser/plist_parser.dart';
+import 'package:xml/xml.dart';
 
+/// Base class containing multiple methods of this package.
 class OCSnapshot {
     /// From OpenCorePkg's OcStorageLib.h.
     static const int safePathLength = 128;
@@ -20,22 +27,20 @@ class OCSnapshot {
     ///
     /// [files] is a list of the paths of `ACPI`, `Kexts`, `Drivers`, and `Tools` in `EFI/OC`.
     ///
-    /// [onLog] is called when the package wants to log something. It can be ignored, but you can also make it use either [print] or a custom logging solution.
+    /// [onLog] is called when the package wants to log something. It can be set to null, but you can also make it use either [print] or a custom logging solution. It defaults to [print].
     static Map snapshot(Map data, {
         bool clean = false,
         bool forceUpdateSchema = false,
         OpenCoreVersion? opencoreVersion,
         String? opencoreHash,
+        void Function(String)? onLog = print,
 
         // File paths, relative to the `ACPI`, `Kexts`, `Drivers`, and `Tools` folders respectively.
         required ({List<String> acpi, List<KextData> kexts, List<String> drivers, List<String> tools}) files,
-
-        void Function(String)? onLog,
     }) {
         Map? latestSnapshot;
         Map? targetSnapshot;
         Map? selectedSnapshot;
-        Map? userSnapshot;
 
         // Time to determine the snapshot to use
         opencoreHash ??= "";
@@ -56,7 +61,6 @@ class OCSnapshot {
             if (lowestSnapshot != null && opencoreVersion < lowest) {
                 // The snapshot provided is lower than what we have
                 onLog?.call("User-provided snapshot is lower than the minimum available; using ${lowest.toRawString()} instead.");
-                userSnapshot = lowestSnapshot;
             }
         }
 
@@ -180,14 +184,15 @@ class OCSnapshot {
         onLog?.call("Finished ACPI snapshot: ${["acpiEnabled=${acpiEnabled.length}", "acpiDuplicates=${acpiDuplicates.length}", "acpiDuplicatesDisabled=${acpiDuplicatesDisabled.length}"].join(", ")}");
 
         // Time to do kexts stuff (this is nightmare fuel)
-        if (data["Kexts"] is! Map) data["Kexts"] = {"Add": []};
-        if (data["Kexts"]["Add"] is! List) data["Kexts"]["Add"] = [];
+        if (data["Kernel"] is! Map) data["Kernel"] = {"Add": []};
+        if (data["Kernel"]["Add"] is! List) data["Kernel"]["Add"] = [];
 
         List<(Map<String, dynamic> infoPlist, Map<String, dynamic> kinfo)> kextList = [];
         List<String> omittedKexts = [];
 
         for (var kext in files.kexts) {
             if (!pathIsValid(kext.path)) continue;
+            if (p.basename(kext.path).startsWith(".")) continue;
             late Map<String, dynamic> info;
 
             Map<String, dynamic> data = {
@@ -232,8 +237,6 @@ class OCSnapshot {
 
         for (var r in kextList) {
             var kext = r.$1;
-            var info = r.$2;
-
             if (kexts.whereType<Map>().map((x) => x["BundlePath"] ?? "").contains(kext["BundlePath"])) continue; // We already have it
             kexts.add(kext);
         }
@@ -251,9 +254,8 @@ class OCSnapshot {
             if (match == null) continue;
 
             for (var check in ["ExecutablePath", "PlistPath"]) {
-                if (kext[check] != match.$1["check"]) {
-                    kext[check] = match.$1["check"] ?? "";
-                }
+                final value = match.$1[check];
+                if (value is String && value.isNotEmpty) kext[check] = value;
             }
 
             newKexts.add(kext);
@@ -423,6 +425,7 @@ class OCSnapshot {
 
         for (var tool in files.tools) {
             if (!pathIsValid(tool)) continue;
+            if (p.basename(tool).startsWith(".")) continue;
             if (!tool.endsWith(".efi")) continue;
 
             Map<String, dynamic> entry = {
@@ -496,6 +499,7 @@ class OCSnapshot {
 
         for (var driver in files.drivers) {
             if (!pathIsValid(driver)) continue;
+            if (p.basename(driver).startsWith(".")) continue;
             if (!driver.endsWith(".efi")) continue;
 
             if (snapshotDriversAdd.isEmpty) {
@@ -542,7 +546,7 @@ class OCSnapshot {
 
         List driversEnabled = [];
         List driversDuplicates = [];
-        List<Map<dynamic, dynamic>> driversDuplicatesDisabled = [];
+        List driversDuplicatesDisabled = [];
 
         for (var d in newDrivers) {
             if (d is Map) {
@@ -557,6 +561,75 @@ class OCSnapshot {
                         driversDuplicatesDisabled.add(d);
                     }
                 }
+            } else if (d is String) {
+                if (driversEnabled.contains(d)) {
+                    if (!driversDuplicates.contains(d)) {
+                        driversDuplicates.add(d);
+                    }
+                } else {
+                    driversEnabled.add(d);
+                    driversDuplicatesDisabled.add(d);
+                }
+            }
+        }
+
+        if (driversDuplicates.isNotEmpty) {
+            onLog?.call("Duplicate drivers have been disabled: ${driversDuplicates.join(", ")}");
+        }
+
+        data["UEFI"]["Drivers"] = newDrivers;
+
+        if (forceUpdateSchema) {
+            onLog?.call("Forcing snapshot schema update...");
+            var ignored = ["Comment", "Enabled", "Path", "BundlePath", "ExecutablePath", "PlistPath", "Name"];
+
+            for (var entry in [
+                (data["ACPI"]["Add"] as List<Map>, snapshotAcpiAdd),
+                (data["Kernel"]["Add"] as List<Map>, snapshotKextsAdd),
+                (data["Misc"]["Tools"] as List<Map>, snapshotToolsAdd),
+                (data["UEFI"]["Drivers"] as List<Map>, snapshotDriversAdd),
+            ]) {
+                final List<Map> entries = entry.$1;
+                final Map values = entry.$2;
+
+                values["Comment"] = "";
+                values["Enabled"] = true;
+                if (values.isEmpty) continue;
+
+                for (var entry in entries) {
+                    var toRemove = entry.entries.where((x) => !values.containsKey(x.key) && !ignored.contains(x.key)).map((x) => x.key);
+                    var toAdd = values.entries.where((x) => !entry.containsKey(x)).map((x) => x.key);
+
+                    for (var add in toAdd) {
+                        late dynamic value;
+
+                        if (add.toLowerCase() == "comment") {
+                            p.basename(entry["Path"] ?? entry["BundlePath"] ?? values[add] ?? "Unknown");
+                        } else {
+                            value = values[add];
+                        }
+
+                        entry[add] = value;
+                    }
+
+                    for (var r in toRemove) {
+                        entry.remove(r);
+                    }
+                }
+            }
+        }
+
+        if (longPaths.isNotEmpty) {
+            var formatted = [];
+
+            for (var entry in longPaths) {
+                if (entry.item is String) {
+                    formatted.add(entry.name);
+                } else if (entry.item is Map) {
+                    formatted.add("${entry.name} -> ${entry.pathsTooLong.join(", ")}");
+                }
+
+                onLog?.call("The following file paths have been found to exceed the $safePathLength-character safe path max declared by OpenCore, and may not work as intended:\n${formatted.join(", ")}");
             }
         }
 
@@ -564,6 +637,7 @@ class OCSnapshot {
         return data;
     }
 
+    /// Try to parse the MinKernel/MaxKernel values from a kext dictionary.
     static (KernelLimitation min, KernelLimitation max) getMinMaxFromKext(Map kext, {bool useMatch = false}) {
         if (useMatch) return getMinMaxFromMatch(kext["MatchKernel"] ?? "");
         String min = kext["MinKernel"] ?? "0.0.0";
@@ -573,6 +647,7 @@ class OCSnapshot {
         return (KernelLimitation.from(min), KernelLimitation.from(max));
     }
 
+    /// Try to parse the MinKernel/MaxKernel values from a match.
     static (KernelLimitation min, KernelLimitation max) getMinMaxFromMatch(String match) {
         var min = "0.0.0";
         var max = "99.99.99";
@@ -597,6 +672,7 @@ class OCSnapshot {
         return (KernelLimitation.from(min), KernelLimitation.from(max));
     }
 
+    /// If a path is too long (including prefix), then we return it enclosed in a list. Otherwise, return a blank list.
     static List<({Object item, String name, List<String> pathsTooLong})> checkPathLength(Object item, String prefix) {
         int length = prefix.length;
         List<String> pathsTooLong = [];
@@ -636,39 +712,125 @@ class OCSnapshot {
 
     /// So we're not counting one of macOS's auto-generated files.
     static bool pathIsValid(String path) {
-        return !path.startsWith(".") && !path.split(".").contains("__MACOSX");
+        return !path.split(".").contains("__MACOSX");
     }
 
+    /// Turn an absolute path into a path relative to the inputted [root].
+    ///
+    /// If [path] does not contain [root], [path] is returned unchanged.
     static String pathToRelative(Directory root, String path) {
         return path.startsWith(root.path) ? path.substring(root.path.length + 1) : path;
     }
 
-    static List<String> listDirectory(Directory directory, {void Function(String) onLog = print}) {
+    /// This lists the files of a directory recursively. This will then return a list of *relative* file paths.
+    static List<String> listDirectory(Directory directory, {void Function(String)? onLog = print}) {
         List<String> results = directory.listSync(recursive: true).whereType<File>().map((x) {
             return pathToRelative(directory, x.path);
         }).toList();
 
-        onLog("Found ${results.length} files for ${p.basename(directory.path)}");
+        onLog?.call("Found ${results.length} files for ${p.basename(directory.path)}");
         return results;
     }
 
-    static List<KextData> listKexts(Directory directory, {void Function(String) onLog = print}) {
+    /// A version of [listDirectory], but for kexts.
+    /// Here, instead of listing all files, we just find all directories that end with `.kext`, then process them.
+    static List<KextData> listKexts(Directory directory, {void Function(String)? onLog = print}) {
         List<Directory> kexts = directory.listSync(recursive: true, followLinks: false).whereType<Directory>().where((x) => x.path.endsWith(".kext")).toList();
-        onLog("Found ${kexts.length} kexts");
+        onLog?.call("Found ${kexts.length} kexts");
         return kexts.map((x) => KextData.fromDirectory(directory, x)).whereType<KextData>().toList();
+    }
+
+    /// A custom function to turn an [Object] into a plist.
+    ///
+    /// [showNull] will make null values have a `<null/>` tag.
+    ///
+    /// [prettyIndent] judges if the outputted string should be formatted or not. If this is null or less than 1, then the output will not be formatted.
+    static String toPlist(Object? input, {bool showNull = false, int? prettyIndent = 4, void Function(String)? onLog}) {
+        XmlNode? process(Object? value) {
+            if (value == null) {
+                return showNull ? XmlElement(XmlName("null")) : null;
+            } else if (value is String) {
+                return XmlElement(XmlName("string"), [], [XmlText(value)]);
+            } else if (value is int) {
+                return XmlElement(XmlName("integer"), [], [XmlText(value.toString())]);
+            } else if (value is double) {
+                return XmlElement(XmlName("real"), [], [XmlText(value.toString())]);
+            } else if (value is bool) {
+                return XmlElement(XmlName(value ? "true" : "false"));
+            } else if (value is DateTime) {
+                return XmlElement(XmlName("date"), [], [XmlText(value.toUtc().toIso8601String())]);
+            } else if (value is Uint8List) {
+                final text = base64Encode(value);
+                return XmlElement(XmlName("data"), [], [XmlText(text)]);
+            } else if (value is List) {
+                return XmlElement(XmlName("array"), [], value.map((x) => process(x)).whereType<XmlNode>());
+            } else if (value is Map) {
+                List<XmlNode> children = [];
+
+                value.forEach((key, value) {
+                XmlNode? node = process(value);
+
+                if (node != null) {
+                    children.add(XmlElement(XmlName("key"), [], [XmlText(key)]));
+                    children.add(node);
+                }
+                });
+
+                return XmlElement(XmlName("dict"), [], children);
+            } else {
+                onLog?.call("Warning: Invalid plist type: ${value.runtimeType}");
+                return null;
+            }
+        }
+
+        XmlBuilder builder = XmlBuilder();
+        builder.processing('xml', 'version="1.0" encoding="UTF-8"');
+
+        builder.element('plist', nest: () {
+            builder.attribute('version', '1.0');
+        });
+
+        XmlDocument document = builder.buildDocument();
+        document.rootElement.children.add(process(input)!);
+        bool pretty = prettyIndent != null && prettyIndent > 0;
+
+        return document.toXmlString(
+            pretty: pretty,
+            indent: pretty ? " " * prettyIndent : null,
+            newLine: pretty ? "\n" : null,
+        );
     }
 }
 
+/// A class that represents a specific version of OpenCore, or the latest in general.
+///
+/// - 1.0.6: [main].[sub].[patch]
+/// - Latest: [latest] is true
 class OpenCoreVersion implements Comparable<OpenCoreVersion> {
     final bool _latest;
-    bool get latest => _latest;
 
+    /// Main version number.
     final int main;
+
+    /// Second version number.
     final int sub;
+
+    /// Last version number.
     final int patch;
 
+    /// If this [OpenCoreVersion] represents the latest OpenCore in general.
+    bool get latest => _latest;
+
+    /// A class that represents a specific version of OpenCore, or the latest in general.
+    ///
+    /// - 1.0.6: [main].[sub].[patch]
+    /// - Latest: [latest] is true
     OpenCoreVersion(this.main, this.sub, this.patch) : _latest = false;
+
+    /// Return an [OpenCoreVersion] from an inputted string. Sections that can't be parsed default to 0.
     OpenCoreVersion.from(String? version) : main = int.tryParse(version?.split(".").elementAtOrNull(0) ?? "") ?? 0, sub = int.tryParse(version?.split(".").elementAtOrNull(1) ?? "") ?? 0, patch = int.tryParse(version?.split(".").elementAtOrNull(2) ?? "") ?? 0, _latest = false;
+
+    /// The latest OpenCore in general.
     OpenCoreVersion.latest() : _latest = true, main = 0, sub = 0, patch = 0;
 
     @override
@@ -682,9 +844,16 @@ class OpenCoreVersion implements Comparable<OpenCoreVersion> {
         return patch.compareTo(other.patch);
     }
 
+    /// This [OpenCoreVersion] is less than the other [OpenCoreVersion].
     bool operator <(OpenCoreVersion other) => compareTo(other) < 0;
+
+    /// This [OpenCoreVersion] is greater than the other [OpenCoreVersion].
     bool operator >(OpenCoreVersion other) => compareTo(other) > 0;
+
+    /// This [OpenCoreVersion] is less than or equal to the other [OpenCoreVersion].
     bool operator <=(OpenCoreVersion other) => compareTo(other) <= 0;
+
+    /// This [OpenCoreVersion] is greater than or equal to the other [OpenCoreVersion].
     bool operator >=(OpenCoreVersion other) => compareTo(other) >= 0;
 
     @override
@@ -694,28 +863,57 @@ class OpenCoreVersion implements Comparable<OpenCoreVersion> {
         latest == other.latest;
 
     @override
+    int get hashCode => Object.hash(latest, main, sub, patch);
+
+    @override
     String toString() {
         return _latest ? "Latest" : "V. ${toRawString()}";
     }
 
+    /// Either `Latest` or [main].[sub].[patch].
     String toRawString() {
         return _latest ? "Latest" : [main, sub, patch].join(".");
     }
 }
 
+/// Represents a kext and its data.
 class KextData {
+    /// The name of the kext (including `.kext`).
     final String name;
+
+    /// The relative path of the kext in the `Kexts` folder.
     final String path;
+
+    /// The path to its `Info.plist`, relative to the bundle path.
     final String infoPlistPath;
+
+    /// The loaded data in its `Info.plist`.
     final Map infoPlistData;
+
+    /// The optional path to its executable, relative to the bundle path.
     final String? executablePath;
 
+    /// Represents a kext and its data.
     const KextData({required this.name, required this.path, required this.infoPlistPath, required this.infoPlistData, required this.executablePath});
 
-    static KextData? fromDirectory(Directory rootKextsDir, Directory directory) {
-        if (!directory.existsSync() || !rootKextsDir.existsSync()) {
-            print("A provided directory doesn't exist.");
+    /// Try to get a kext's info from a passed directory.
+    ///
+    /// [rootKextsDir] should be the directory of `EFI/OC/Kexts`, and [directory] should be the directory of the actual kext itself.
+    static KextData? tryFromDirectory(Directory rootKextsDir, Directory directory) {
+        try {
+            return fromDirectory(rootKextsDir, directory);
+        } catch (e) {
             return null;
+        }
+    }
+
+
+    /// Get a kext's info from a passed directory.
+    ///
+    /// [rootKextsDir] should be the directory of `EFI/OC/Kexts`, and [directory] should be the directory of the actual kext itself.
+    static KextData fromDirectory(Directory rootKextsDir, Directory directory) {
+        if (!directory.existsSync() || !rootKextsDir.existsSync()) {
+            throw NotFoundException("A provided directory doesn't exist.");
         }
 
         String name = p.basename(directory.path);
@@ -724,8 +922,7 @@ class KextData {
         File? potentialExecutable = info["CFBundleExecutable"] is String ? File(p.join(directory.path, "Contents", "MacOS", info["CFBundleExecutable"])) : null;
 
         if (!bundle.existsSync()) {
-            print("KextData.fromDirectory: Bundle path doesn't exist for kext $name: ${bundle.path}");
-            return null;
+            throw NotFoundException("KextData.fromDirectory: Bundle path doesn't exist for kext $name: ${bundle.path}");
         }
 
         return KextData(
@@ -740,11 +937,18 @@ class KextData {
     }
 }
 
+/// A class representing a kernel version for MinKernel/MaxKernel values.
 class KernelLimitation implements Comparable<KernelLimitation> {
+    /// Major version number.
     final int major;
+
+    /// Minor version number.
     final int minor;
+
+    /// Last version number.
     final int patch;
 
+    /// Parse from a string. Any section that cannot be parsed will default to 0.
     KernelLimitation.from(String? version) : major = int.tryParse(version?.split(".").elementAtOrNull(0) ?? "") ?? 0, minor = int.tryParse(version?.split(".").elementAtOrNull(1) ?? "") ?? 0, patch = int.tryParse(version?.split(".").elementAtOrNull(2) ?? "") ?? 0;
 
     @override
@@ -754,11 +958,21 @@ class KernelLimitation implements Comparable<KernelLimitation> {
         return patch.compareTo(other.patch);
     }
 
+    /// This [KernelLimitation] is less than the other [KernelLimitation].
     bool operator <(KernelLimitation other) => compareTo(other) < 0;
+
+    /// This [KernelLimitation] is greater than the other [KernelLimitation].
     bool operator >(KernelLimitation other) => compareTo(other) > 0;
+
+    /// This [KernelLimitation] is less than or equal to the other [KernelLimitation].
     bool operator <=(KernelLimitation other) => compareTo(other) <= 0;
+
+    /// This [KernelLimitation] is greater than or equal to the other [KernelLimitation].
     bool operator >=(KernelLimitation other) => compareTo(other) >= 0;
 
     @override
     bool operator ==(Object other) => other is KernelLimitation && compareTo(other) == 0;
+
+    @override
+    int get hashCode => Object.hash(major, minor, patch);
 }

@@ -1,3 +1,3 @@
-## 1.0.0
+## 0.0.0
 
-- Initial version.
+- Initial beta. Please don't rely on this package yet.

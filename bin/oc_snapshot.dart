@@ -5,7 +5,6 @@ import 'package:crypto/crypto.dart';
 import 'package:oc_snapshot/oc_snapshot.dart';
 import 'package:plist_parser/plist_parser.dart';
 import 'package:path/path.dart' as p;
-import 'package:propertylistserialization/propertylistserialization.dart';
 
 const bool allowOverwriteOriginal = false;
 
@@ -75,16 +74,16 @@ void main(List<String> arguments) async {
       print("OpenCore.efi doesn't exist, ignoring.");
     }
 
-    result = OCSnapshot.snapshot(data, files: (acpi: OCSnapshot.listDirectory(acpi), kexts: OCSnapshot.listKexts(kexts), drivers: OCSnapshot.listDirectory(drivers), tools: OCSnapshot.listDirectory(tools)), onLog: print, opencoreVersion: openCoreVersion, opencoreHash: opencore.existsSync() ? await hash(opencore) : null, clean: args["clean"], forceUpdateSchema: args["force-update-schema"]);
+    result = OCSnapshot.snapshot(data, files: (acpi: OCSnapshot.listDirectory(acpi), kexts: OCSnapshot.listKexts(kexts), drivers: OCSnapshot.listDirectory(drivers), tools: OCSnapshot.listDirectory(tools)), opencoreVersion: openCoreVersion, opencoreHash: opencore.existsSync() ? await hash(opencore) : null, clean: args["clean"], forceUpdateSchema: args["force-update-schema"]);
 
     print("Returned from snapshotting");
     break;
   }
 
-  String plist = PropertyListSerialization.stringWithPropertyList(result);
+  String plist = OCSnapshot.toPlist(result);
   File out = File(args["out"] == null && allowOverwriteOriginal ? args["in"] : args["out"]!);
 
-  print("Writing result to $out...");
+  print("Writing result to ${out.absolute.path}...");
   out.writeAsStringSync(plist);
   exit(0);
 }
