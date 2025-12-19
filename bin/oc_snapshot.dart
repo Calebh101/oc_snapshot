@@ -24,6 +24,7 @@ void main(List<String> arguments) async {
 
   try {
     args = parser.parse(arguments);
+    args["oc"]; // Make sure we error here for arguments that are "mandatory"
   } catch (e) {
     print("$e\n\nUsage:\n${parser.usage}");
     exit(1);

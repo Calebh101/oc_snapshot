@@ -1,6 +1,6 @@
 name: oc_snapshot
 description: Port of CorpNewt's OCSnapshot. Supports both CLI use and Dart use.
-version: 0.0.1
+version: 0.0.2
 repository: https://github.com/Calebh101/oc_snapshot
 
 environment:
