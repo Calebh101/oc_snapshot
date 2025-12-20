@@ -7,4 +7,7 @@
 pubspec.lock
 
 # Debugging
-*config.plist
+*config.plist*
+
+# IDE folders
+.vscode

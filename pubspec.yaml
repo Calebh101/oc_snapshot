@@ -10,7 +10,6 @@ dependencies:
   path: ^1.9.1
   args: ^2.7.0
   plist_parser: ^0.2.6
-  propertylistserialization: ^1.4.1
   crypto: ^3.0.7
   xml: ^6.6.1
 

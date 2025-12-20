@@ -200,8 +200,11 @@ class OCSnapshot {
                 "Comment": kext.name,
                 "Enabled": true,
                 "ExecutablePath": "",
-                "PlistPath": kext.infoPlistPath,
             };
+
+            for (var e in snapshotKextsAdd.entries) data[e.key] = e.value;
+            data["PlistPath"] = kext.infoPlistPath;
+            data["ExecutablePath"] = kext.executablePath ?? "";
 
             try {
                 Map infoPlist = kext.infoPlistData;
@@ -280,7 +283,7 @@ class OCSnapshot {
             for (var z in newKexts) {
                 for (var y in kextList) {
                     if (z["BundlePath"] == y.$1["BundlePath"]) {
-                        if ((y.$2["osbl"] as List? ?? []).contains(y.$2["cfbi"] ?? "")) {
+                        if ((info["osbl"] as List? ?? []).contains(y.$2["cfbi"] ?? "")) {
                             parents.add((z, y.$2));
                         }
                     }
@@ -414,8 +417,8 @@ class OCSnapshot {
             onLog?.call("Duplicate CFBundleIdentifiers have been disabled: ${duplicateBundles.join(", ")}");
         }
 
-        data["Kernel"]["Add"] = orderedKexts;
         // Wow that took a while
+        data["Kernel"]["Add"] = orderedKexts;
 
         // Time to do tools stuff
         if (data["Misc"] is! Map) data["Misc"] = {"Tools": []};
@@ -437,9 +440,9 @@ class OCSnapshot {
 
             for (var e in snapshotToolsAdd.entries) {
                 if (e.key == "Flavour" && tool.toLowerCase().endsWith("shell.efi")) {
-                    entry[e.key] == "OpenShell:UEFIShell:Shell";
+                    entry[e.key] = "OpenShell:UEFIShell:Shell";
                 } else {
-                    entry[e.key] == snapshotToolsAdd[e.key];
+                    entry[e.key] = snapshotToolsAdd[e.key];
                 }
             }
 
@@ -449,7 +452,7 @@ class OCSnapshot {
         List tools = clean ? [] : data["Misc"]["Tools"];
         tools.sort((a, b) => (a["Path"] as String? ?? "").compareTo((b["Path"] as String? ?? "").toLowerCase()));
 
-        for (var tool in tools) {
+        for (var tool in toolsList) {
             if (tools.whereType<Map>().map((x) => (x["Path"]?.toString() ?? "").toLowerCase()).contains((tool["Path"]?.toString() ?? "").toLowerCase())) continue;
             tools.add(tool);
         }
@@ -511,7 +514,7 @@ class OCSnapshot {
                 };
 
                 for (var x in snapshotDriversAdd.entries) {
-                    entry[x.key] = x.key.toLowerCase() == "Comment" ? p.basename(driver) : snapshotDriversAdd[x.key];
+                    entry[x.key] = x.key.toLowerCase() == "comment" ? p.basename(driver) : snapshotDriversAdd[x.key];
                     driversList.add(entry);
                 }
             }
@@ -584,12 +587,12 @@ class OCSnapshot {
             var ignored = ["Comment", "Enabled", "Path", "BundlePath", "ExecutablePath", "PlistPath", "Name"];
 
             for (var entry in [
-                (data["ACPI"]["Add"] as List<Map>, snapshotAcpiAdd),
-                (data["Kernel"]["Add"] as List<Map>, snapshotKextsAdd),
-                (data["Misc"]["Tools"] as List<Map>, snapshotToolsAdd),
-                (data["UEFI"]["Drivers"] as List<Map>, snapshotDriversAdd),
+                (data["ACPI"]["Add"], snapshotAcpiAdd),
+                (data["Kernel"]["Add"], snapshotKextsAdd),
+                (data["Misc"]["Tools"], snapshotToolsAdd),
+                (data["UEFI"]["Drivers"], snapshotDriversAdd),
             ]) {
-                final List<Map> entries = entry.$1;
+                final List entries = entry.$1;
                 final Map values = entry.$2;
 
                 values["Comment"] = "";
@@ -785,6 +788,7 @@ class OCSnapshot {
 
         XmlBuilder builder = XmlBuilder();
         builder.processing('xml', 'version="1.0" encoding="UTF-8"');
+        builder.doctype("plist", publicId: "-//Apple//DTD PLIST 1.0//EN", systemId: "http://www.apple.com/DTDs/PropertyList-1.0.dtd");
 
         builder.element('plist', nest: () {
             builder.attribute('version', '1.0');
